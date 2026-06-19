@@ -314,6 +314,25 @@ def _ler_individual(xlsx_path):
     return unidade_texto, headers, rows
 
 
+def _padronizar_aba_existente(ws):
+    """Reaplica maiúsculas e fonte padrão (Arial) em uma aba já existente do consolidado,
+    garantindo consistência mesmo em histórico gravado antes desta padronização."""
+    if ws.max_row < 1 or not ws['A1'].value:
+        return
+
+    for cell in ws[1]:
+        if cell.value:
+            cell.value = str(cell.value).upper()
+            cell.font = Font(name='Arial', bold=True, size=12, color='FFFFFF')
+            cell.fill = fill(PRIMARY_PURE)
+
+    for linha in ws.iter_rows(min_row=2):
+        for cell in linha:
+            if isinstance(cell.value, str):
+                cell.value = cell.value.upper()
+            cell.font = Font(name='Arial', size=12, color=DARK_02)
+
+
 def carregar_consolidado(caminho):
     """Abre o consolidado existente ou cria um novo, garantindo as duas abas obrigatórias."""
     if os.path.exists(caminho):
@@ -325,6 +344,7 @@ def carregar_consolidado(caminho):
     for nome_aba in (ABA_CURITIBA, ABA_TOLEDO):
         if nome_aba not in wb.sheetnames:
             wb.create_sheet(nome_aba)
+        _padronizar_aba_existente(wb[nome_aba])
 
     return wb
 
@@ -337,7 +357,7 @@ def _garantir_cabecalho(ws, headers_origem):
     inicio = len(cabecalho_atual) + 1
     for offset, h in enumerate(novas_colunas):
         cell = ws.cell(row=1, column=inicio + offset, value=h)
-        cell.font = Font(name='Poppins', bold=True, size=10, color='FFFFFF')
+        cell.font = Font(name='Arial', bold=True, size=12, color='FFFFFF')
         cell.fill = fill(PRIMARY_PURE)
     cabecalho_atual.extend(novas_colunas)
 
@@ -386,8 +406,9 @@ def inserir_registros(ws, cabecalho, headers_origem, rows):
             continue
 
         for col_idx, valor in enumerate(linha_destino, start=1):
+            valor = valor.upper() if isinstance(valor, str) else valor
             cell = ws.cell(row=proxima_linha, column=col_idx, value=valor)
-            cell.font = Font(name='Source Sans Pro', size=9, color=DARK_02)
+            cell.font = Font(name='Arial', size=12, color=DARK_02)
 
         chaves_existentes.add(chave)
         proxima_linha += 1
@@ -416,6 +437,8 @@ def consolidar_planilhas(pasta_bases):
         if nome_aba is None:
             print(f"  [AVISO] Unidade não identificada em {os.path.basename(arquivo)} — ignorado na consolidação")
             continue
+
+        headers = [h.upper() for h in headers]
 
         ws = wb_consolidado[nome_aba]
         cabecalho = _garantir_cabecalho(ws, headers)
