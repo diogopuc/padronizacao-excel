@@ -6,7 +6,8 @@ Uso: python main.py
 
 import os
 import glob
-from openpyxl import Workbook
+import unicodedata
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # ── Paleta PUCPR ──────────────────────────────────────────────────────────────
@@ -23,6 +24,12 @@ SKIP_KEYWORDS = ['Cartão', 'Credencial', 'Página', 'UNIDADE', 'Relatório',
 
 # ── Caminho da pasta de bases (relativo ao script) ────────────────────────────
 PASTA_BASES = os.path.join(os.path.dirname(__file__), '..', 'bases')
+
+# ── Consolidação histórica por unidade ────────────────────────────────────────
+NOME_CONSOLIDADO = 'consolidado.xlsx'
+ABA_CURITIBA     = 'PUCPR - CURITIBA'
+ABA_TOLEDO       = 'PUCPR - TOLEDO'
+CHAVE_DEDUP      = ['CARTÃO', 'CREDENCIAL', 'DATA', 'EVENTO']
 
 
 def fill(hex_color):
@@ -153,6 +160,167 @@ def processar(csv_path):
     print(f"  ✓ {len(rows)} registros → {os.path.basename(output_path)}")
 
 
+# ── Consolidação histórica por unidade ────────────────────────────────────────
+
+def _normalizar(texto):
+    """Remove acentos e caixa para comparação robusta (ex.: 'PARANÁ' -> 'PARANA')."""
+    sem_acento = unicodedata.normalize('NFKD', texto or '')
+    return ''.join(c for c in sem_acento if not unicodedata.combining(c)).upper()
+
+
+def obter_unidade(texto_unidade):
+    """Identifica a aba de destino (Curitiba/Toledo) a partir do texto de unidade do relatório."""
+    texto = _normalizar(texto_unidade)
+    if 'TOLEDO' in texto:
+        return ABA_TOLEDO
+    if 'PARANA' in texto:
+        return ABA_CURITIBA
+    return None
+
+
+def _localizar_linha_cabecalho(ws, limite_busca=10):
+    """Procura nas primeiras linhas a que contém o cabeçalho 'CARTÃO', sem depender de posição fixa
+    (arquivos gerados por versões anteriores do script podem não ter a linha espaçadora)."""
+    for r in range(1, limite_busca + 1):
+        valor = ws.cell(row=r, column=1).value
+        if valor and _normalizar(str(valor)) == 'CARTAO':
+            return r
+    return None
+
+
+def _ler_individual(xlsx_path):
+    """Lê unidade, cabeçalho e dados de um XLSX já gerado por _build_xlsx, localizando o
+    cabeçalho dinamicamente para suportar colunas novas ou layouts ligeiramente diferentes."""
+    wb = load_workbook(xlsx_path, data_only=True)
+    ws = wb.active
+
+    unidade_texto = ws['A1'].value or ''
+
+    linha_cabecalho = _localizar_linha_cabecalho(ws)
+    if linha_cabecalho is None:
+        return unidade_texto, [], []
+
+    headers = []
+    col = 1
+    while ws.cell(row=linha_cabecalho, column=col).value:
+        headers.append(str(ws.cell(row=linha_cabecalho, column=col).value).strip())
+        col += 1
+
+    rows = []
+    for linha in ws.iter_rows(min_row=linha_cabecalho + 1, max_col=len(headers), values_only=True):
+        valores = [v if v is not None else '' for v in linha]
+        if any(str(v).strip() for v in valores):
+            rows.append(valores)
+
+    return unidade_texto, headers, rows
+
+
+def carregar_consolidado(caminho):
+    """Abre o consolidado existente ou cria um novo, garantindo as duas abas obrigatórias."""
+    if os.path.exists(caminho):
+        wb = load_workbook(caminho)
+    else:
+        wb = Workbook()
+        wb.remove(wb.active)
+
+    for nome_aba in (ABA_CURITIBA, ABA_TOLEDO):
+        if nome_aba not in wb.sheetnames:
+            wb.create_sheet(nome_aba)
+
+    return wb
+
+
+def _garantir_cabecalho(ws, headers_origem):
+    """Escreve o cabeçalho na aba se ainda não existir; acrescenta colunas novas ao final, se houver."""
+    cabecalho_atual = [c.value for c in ws[1] if c.value] if ws['A1'].value else []
+
+    novas_colunas = [h for h in headers_origem if h not in cabecalho_atual]
+    inicio = len(cabecalho_atual) + 1
+    for offset, h in enumerate(novas_colunas):
+        cell = ws.cell(row=1, column=inicio + offset, value=h)
+        cell.font = Font(name='Poppins', bold=True, size=10, color='FFFFFF')
+        cell.fill = fill(PRIMARY_PURE)
+    cabecalho_atual.extend(novas_colunas)
+
+    if cabecalho_atual:
+        ws.freeze_panes = 'A2'
+
+    return cabecalho_atual
+
+
+def registro_ja_existe(chave, chaves_existentes):
+    return chave in chaves_existentes
+
+
+def inserir_registros(ws, cabecalho, headers_origem, rows):
+    """Insere apenas registros inéditos abaixo do histórico já presente na aba."""
+    indices_chave = [cabecalho.index(c) for c in CHAVE_DEDUP if c in cabecalho]
+    mapa_colunas  = [cabecalho.index(h) for h in headers_origem]
+
+    chaves_existentes = set()
+    for linha in ws.iter_rows(min_row=2, values_only=True):
+        chave = tuple(str(linha[i]).strip().upper() if i < len(linha) and linha[i] is not None else ''
+                       for i in indices_chave)
+        chaves_existentes.add(chave)
+
+    proxima_linha = ws.max_row + 1
+    inseridos = 0
+    for row in rows:
+        linha_destino = [''] * len(cabecalho)
+        for col_origem, col_destino in enumerate(mapa_colunas):
+            linha_destino[col_destino] = row[col_origem]
+
+        chave = tuple(str(linha_destino[i]).strip().upper() for i in indices_chave)
+        if registro_ja_existe(chave, chaves_existentes):
+            continue
+
+        for col_idx, valor in enumerate(linha_destino, start=1):
+            cell = ws.cell(row=proxima_linha, column=col_idx, value=valor)
+            cell.font = Font(name='Source Sans Pro', size=9, color=DARK_02)
+
+        chaves_existentes.add(chave)
+        proxima_linha += 1
+        inseridos += 1
+
+    return inseridos
+
+
+def consolidar_planilhas(pasta_bases):
+    """Acumula no consolidado.xlsx os dados de todos os XLSX da pasta, separados por unidade."""
+    caminho_consolidado = os.path.join(pasta_bases, NOME_CONSOLIDADO)
+    arquivos = sorted(
+        f for f in glob.glob(os.path.join(pasta_bases, '*.xlsx'))
+        if os.path.basename(f) != NOME_CONSOLIDADO
+    )
+
+    if not arquivos:
+        return
+
+    wb_consolidado = carregar_consolidado(caminho_consolidado)
+    total_inseridos = {ABA_CURITIBA: 0, ABA_TOLEDO: 0}
+
+    for arquivo in arquivos:
+        unidade_texto, headers, rows = _ler_individual(arquivo)
+        nome_aba = obter_unidade(unidade_texto)
+        if nome_aba is None:
+            print(f"  [AVISO] Unidade não identificada em {os.path.basename(arquivo)} — ignorado na consolidação")
+            continue
+
+        ws = wb_consolidado[nome_aba]
+        cabecalho = _garantir_cabecalho(ws, headers)
+        total_inseridos[nome_aba] += inserir_registros(ws, cabecalho, headers, rows)
+
+    for nome_aba in (ABA_CURITIBA, ABA_TOLEDO):
+        ws = wb_consolidado[nome_aba]
+        if ws.max_row >= 2 and ws.max_column >= 1:
+            ultima_coluna = ws.cell(row=1, column=ws.max_column).column_letter
+            ws.auto_filter.ref = f"A1:{ultima_coluna}{ws.max_row}"
+
+    wb_consolidado.save(caminho_consolidado)
+    print(f"\nConsolidado atualizado: +{total_inseridos[ABA_CURITIBA]} CURITIBA, "
+          f"+{total_inseridos[ABA_TOLEDO]} TOLEDO ({NOME_CONSOLIDADO})")
+
+
 if __name__ == '__main__':
     pasta = os.path.abspath(PASTA_BASES)
 
@@ -162,12 +330,15 @@ if __name__ == '__main__':
 
     arquivos = glob.glob(os.path.join(pasta, '*.csv'))
 
-    if not arquivos:
+    if arquivos:
+        print(f"Encontrados {len(arquivos)} arquivo(s) em: {pasta}\n")
+        for arquivo in sorted(arquivos):
+            processar(arquivo)
+    else:
         print(f"Nenhum CSV encontrado em: {pasta}")
-        exit(0)
 
-    print(f"Encontrados {len(arquivos)} arquivo(s) em: {pasta}\n")
-    for arquivo in sorted(arquivos):
-        processar(arquivo)
+    # A consolidação roda sempre, mesmo sem CSV novo, para absorver XLSX já
+    # presentes em bases/ que ainda não tenham sido incorporados ao histórico.
+    consolidar_planilhas(pasta)
 
     print("\nConcluído.")
