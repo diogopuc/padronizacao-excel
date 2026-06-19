@@ -6,6 +6,7 @@ Uso: python main.py
 
 import os
 import glob
+import shutil
 import datetime
 import unicodedata
 from openpyxl import Workbook, load_workbook
@@ -30,6 +31,14 @@ LARGURA_COLUNA_DINAMICA = 20
 
 # ── Caminho da pasta de bases (relativo ao script) ────────────────────────────
 PASTA_BASES = os.path.join(os.path.dirname(__file__), '..', 'bases')
+
+# Pasta adicional que recebe uma cópia do consolidado (painel Power BI próprio,
+# fora da estrutura deste projeto).
+PASTA_DESTINO_GEO = os.path.join(
+    os.path.expanduser('~'), 'Grupo Marista',
+    'Central de Dados - Gerência de Planejamento e Controle Acadêmico - Documentos',
+    'Geolocalização'
+)
 
 # ── Consolidação histórica por unidade ────────────────────────────────────────
 NOME_CONSOLIDADO = 'consolidado.xlsx'
@@ -453,6 +462,23 @@ def consolidar_planilhas(pasta_bases):
     wb_consolidado.save(caminho_consolidado)
     print(f"\nConsolidado atualizado: +{total_inseridos[ABA_CURITIBA]} CURITIBA, "
           f"+{total_inseridos[ABA_TOLEDO]} TOLEDO ({NOME_CONSOLIDADO})")
+
+    _replicar_consolidado(caminho_consolidado)
+
+
+def _replicar_consolidado(caminho_consolidado):
+    """Copia o consolidado.xlsx também para a pasta de Geolocalização, usada por outro
+    painel Power BI que consome a mesma base fora da estrutura deste projeto."""
+    if not os.path.isdir(PASTA_DESTINO_GEO):
+        print(f"  [AVISO] Pasta de destino não encontrada, cópia não realizada: {PASTA_DESTINO_GEO}")
+        return
+
+    destino = os.path.join(PASTA_DESTINO_GEO, NOME_CONSOLIDADO)
+    try:
+        shutil.copy2(caminho_consolidado, destino)
+        print(f"  Consolidado replicado em: {destino}")
+    except OSError as erro:
+        print(f"  [AVISO] Não foi possível replicar o consolidado em {destino}: {erro}")
 
 
 if __name__ == '__main__':
