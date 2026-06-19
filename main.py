@@ -6,9 +6,11 @@ Uso: python main.py
 
 import os
 import glob
+import datetime
 import unicodedata
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 # ── Paleta PUCPR ──────────────────────────────────────────────────────────────
 PRIMARY_PURE     = "8A0538"
@@ -21,6 +23,10 @@ DARK_02          = "404040"
 
 SKIP_KEYWORDS = ['Cartão', 'Credencial', 'Página', 'UNIDADE', 'Relatório',
                  'Emissão', 'Período', 'Usuário:', 'Cartão:']
+
+HEADERS_PADRAO = ['CARTÃO', 'CREDENCIAL', 'DATA', 'EVENTO', 'USUÁRIO', 'DESCRIÇÃO', 'GRUPO']
+LARGURAS_PADRAO = [12, 14, 20, 22, 44, 14, 24]
+LARGURA_COLUNA_DINAMICA = 20
 
 # ── Caminho da pasta de bases (relativo ao script) ────────────────────────────
 PASTA_BASES = os.path.join(os.path.dirname(__file__), '..', 'bases')
@@ -73,10 +79,12 @@ def _parse_csv(filepath):
     return meta, rows
 
 
-def _build_xlsx(meta, rows, output_path):
+def _build_xlsx(meta, headers, rows, output_path, titulo='RELATÓRIO DE CARTÕES DE CREDENCIADOS'):
     wb = Workbook()
     ws = wb.active
-    ws.title = os.path.splitext(os.path.basename(output_path))[0]
+    ws.title = os.path.splitext(os.path.basename(output_path))[0][:31]
+
+    ultima_coluna = get_column_letter(len(headers))
 
     borda = Border(
         left=Side(style='thin', color='E4E4E4'),
@@ -87,21 +95,21 @@ def _build_xlsx(meta, rows, output_path):
     centro = Alignment(horizontal='center', vertical='center')
     esq    = Alignment(horizontal='left',   vertical='center')
 
-    ws.merge_cells('A1:G1')
+    ws.merge_cells(f'A1:{ultima_coluna}1')
     ws['A1'] = meta['unidade'].upper()
     ws['A1'].font      = Font(name='Poppins', bold=True, size=13, color='FFFFFF')
     ws['A1'].fill      = fill(PRIMARY_PURE)
     ws['A1'].alignment = centro
     ws.row_dimensions[1].height = 24
 
-    ws.merge_cells('A2:G2')
-    ws['A2'] = 'RELATÓRIO DE CARTÕES DE CREDENCIADOS'
+    ws.merge_cells(f'A2:{ultima_coluna}2')
+    ws['A2'] = titulo.upper()
     ws['A2'].font      = Font(name='Poppins', bold=True, size=11, color='FFFFFF')
     ws['A2'].fill      = fill(PRIMARY_DARK)
     ws['A2'].alignment = centro
     ws.row_dimensions[2].height = 20
 
-    ws.merge_cells('A3:G3')
+    ws.merge_cells(f'A3:{ultima_coluna}3')
     ws['A3'] = (
         f"EMISSÃO: {meta['emissao'].upper()}"
         f"   |   PERÍODO: {meta['periodo'].upper()}"
@@ -112,11 +120,10 @@ def _build_xlsx(meta, rows, output_path):
     ws['A3'].alignment = centro
     ws.row_dimensions[3].height = 16
 
-    ws.merge_cells('A4:G4')
+    ws.merge_cells(f'A4:{ultima_coluna}4')
     ws['A4'].fill = fill(LIGHT_PURE_02)
     ws.row_dimensions[4].height = 6
 
-    headers = ['CARTÃO', 'CREDENCIAL', 'DATA', 'EVENTO', 'USUÁRIO', 'DESCRIÇÃO', 'GRUPO']
     for col_idx, h in enumerate(headers, start=1):
         cell = ws.cell(row=5, column=col_idx, value=h)
         cell.font      = Font(name='Poppins', bold=True, size=10, color='FFFFFF')
@@ -136,15 +143,11 @@ def _build_xlsx(meta, rows, output_path):
             cell.alignment = esq
         ws.row_dimensions[excel_row].height = 15
 
-    ws.column_dimensions['A'].width = 12
-    ws.column_dimensions['B'].width = 14
-    ws.column_dimensions['C'].width = 20
-    ws.column_dimensions['D'].width = 22
-    ws.column_dimensions['E'].width = 44
-    ws.column_dimensions['F'].width = 14
-    ws.column_dimensions['G'].width = 24
+    larguras = LARGURAS_PADRAO if headers == HEADERS_PADRAO else [LARGURA_COLUNA_DINAMICA] * len(headers)
+    for idx, largura in enumerate(larguras, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = largura
 
-    ws.auto_filter.ref = f"A5:G{len(rows) + 5}"
+    ws.auto_filter.ref = f"A5:{ultima_coluna}{len(rows) + 5}"
     ws.freeze_panes    = 'A6'
 
     wb.save(output_path)
@@ -156,8 +159,104 @@ def processar(csv_path):
 
     print(f"Processando: {os.path.basename(csv_path)}")
     meta, rows = _parse_csv(csv_path)
-    _build_xlsx(meta, rows, output_path)
+    _build_xlsx(meta, HEADERS_PADRAO, rows, output_path)
     print(f"  ✓ {len(rows)} registros → {os.path.basename(output_path)}")
+
+
+# ── Ingestão de bases brutas em XLSX (ex.: relatórios de cancela/catraca) ─────
+# O sistema institucional também pode exportar a base diretamente em XLSX, com
+# layout próprio (diferente do CSV) e suas próprias colunas. Essas bases são
+# padronizadas visualmente preservando todas as colunas originais, sem forçar
+# o padrão de 7 colunas usado pelo CSV de cartões de credenciados.
+
+def _ja_processado(ws):
+    """Verifica se o XLSX já foi estilizado por este script (cor de fundo PUCPR em A1)."""
+    cel = ws['A1']
+    if not cel.fill or cel.fill.patternType != 'solid':
+        return False
+    cor = str(cel.fill.start_color.rgb or '').upper()
+    return cor.endswith(PRIMARY_PURE.upper())
+
+
+def _normalizar_valor(valor):
+    if valor is None:
+        return ''
+    if isinstance(valor, datetime.datetime):
+        return valor.strftime('%d/%m/%y %H:%M:%S')
+    return str(valor).strip().upper()
+
+
+def _extrair_meta_generica(ws, linha_cabecalho):
+    """Lê as linhas de metadados (texto livre tipo 'Chave: valor') acima do cabeçalho."""
+    meta_bruta = {}
+    for r in range(1, linha_cabecalho):
+        valores = [ws.cell(row=r, column=c).value for c in range(1, ws.max_column + 1)]
+        texto = next((v for v in valores if isinstance(v, str) and v.strip()), None)
+        if texto and ':' in texto:
+            chave, _, valor = texto.partition(':')
+            meta_bruta[chave.strip()] = valor.strip()
+    return meta_bruta
+
+
+def _ler_xlsx_bruto(xlsx_path):
+    """Lê uma base bruta em XLSX (não gerada por este script): metadados em texto livre,
+    cabeçalho e dados localizados dinamicamente, preservando todas as colunas originais."""
+    wb = load_workbook(xlsx_path, data_only=True)
+    ws = wb.active
+
+    linha_cabecalho, indices = _detectar_cabecalho(ws)
+    if linha_cabecalho is None:
+        return None
+
+    meta_bruta = _extrair_meta_generica(ws, linha_cabecalho)
+    headers = [str(ws.cell(row=linha_cabecalho, column=c).value).strip() for c in indices]
+
+    rows = []
+    for r in range(linha_cabecalho + 1, ws.max_row + 1):
+        valores = [_normalizar_valor(ws.cell(row=r, column=c).value) for c in indices]
+        if any(v for v in valores):
+            rows.append(valores)
+
+    return meta_bruta, headers, rows
+
+
+def obter_unidade_arquivo(texto_relatorio, nome_arquivo):
+    """Identifica a unidade priorizando o texto dos metadados do relatório; usa o nome do
+    arquivo como reserva quando o texto não traz a informação."""
+    return obter_unidade(texto_relatorio) or obter_unidade(nome_arquivo)
+
+
+def processar_xlsx_bruto(xlsx_path):
+    """Padroniza visualmente uma base bruta em XLSX, preservando todas as colunas originais.
+    Arquivos já estilizados por este script são ignorados (idempotência)."""
+    wb_estilo = load_workbook(xlsx_path)
+    if _ja_processado(wb_estilo.active):
+        return False
+
+    resultado = _ler_xlsx_bruto(xlsx_path)
+    if resultado is None:
+        print(f"  [AVISO] Cabeçalho não localizado em {os.path.basename(xlsx_path)} — ignorado")
+        return False
+    meta_bruta, headers, rows = resultado
+
+    texto_relatorio = meta_bruta.get('Relatório', meta_bruta.get('Relatorio', ''))
+    nome_aba = obter_unidade_arquivo(texto_relatorio, os.path.basename(xlsx_path))
+    if nome_aba is None:
+        print(f"  [AVISO] Unidade não identificada em {os.path.basename(xlsx_path)} — ignorado")
+        return False
+
+    meta = {
+        'unidade': nome_aba,
+        'emissao': meta_bruta.get('Data', ''),
+        'periodo': meta_bruta.get('Carimbo de tempo do evento', ''),
+        'usuario': meta_bruta.get('Usuário', meta_bruta.get('Usuario', '')),
+    }
+    titulo = texto_relatorio or 'RELATÓRIO'
+
+    print(f"Processando (XLSX bruto): {os.path.basename(xlsx_path)}")
+    _build_xlsx(meta, headers, rows, xlsx_path, titulo=titulo)
+    print(f"  ✓ {len(rows)} registros → {os.path.basename(xlsx_path)} ({nome_aba})")
+    return True
 
 
 # ── Consolidação histórica por unidade ────────────────────────────────────────
@@ -178,14 +277,17 @@ def obter_unidade(texto_unidade):
     return None
 
 
-def _localizar_linha_cabecalho(ws, limite_busca=10):
-    """Procura nas primeiras linhas a que contém o cabeçalho 'CARTÃO', sem depender de posição fixa
-    (arquivos gerados por versões anteriores do script podem não ter a linha espaçadora)."""
+def _detectar_cabecalho(ws, limite_busca=15):
+    """Procura, nas primeiras linhas, a primeira com 3+ células preenchidas — funciona tanto
+    para os XLSX já estilizados (cabeçalho sempre com várias colunas separadas) quanto para
+    bases brutas em XLSX (metadados em texto livre ocupam só 1 célula por linha, sem confundir
+    com o cabeçalho real). Retorna (linha, lista de índices de coluna preenchidos)."""
     for r in range(1, limite_busca + 1):
-        valor = ws.cell(row=r, column=1).value
-        if valor and _normalizar(str(valor)) == 'CARTAO':
-            return r
-    return None
+        valores = [ws.cell(row=r, column=c).value for c in range(1, ws.max_column + 1)]
+        indices = [c for c, v in enumerate(valores, start=1) if v not in (None, '')]
+        if len(indices) >= 3:
+            return r, indices
+    return None, []
 
 
 def _ler_individual(xlsx_path):
@@ -196,19 +298,16 @@ def _ler_individual(xlsx_path):
 
     unidade_texto = ws['A1'].value or ''
 
-    linha_cabecalho = _localizar_linha_cabecalho(ws)
+    linha_cabecalho, indices = _detectar_cabecalho(ws)
     if linha_cabecalho is None:
         return unidade_texto, [], []
 
-    headers = []
-    col = 1
-    while ws.cell(row=linha_cabecalho, column=col).value:
-        headers.append(str(ws.cell(row=linha_cabecalho, column=col).value).strip())
-        col += 1
+    headers = [str(ws.cell(row=linha_cabecalho, column=c).value).strip() for c in indices]
 
     rows = []
-    for linha in ws.iter_rows(min_row=linha_cabecalho + 1, max_col=len(headers), values_only=True):
-        valores = [v if v is not None else '' for v in linha]
+    for r in range(linha_cabecalho + 1, ws.max_row + 1):
+        valores = [ws.cell(row=r, column=c).value for c in indices]
+        valores = [v if v is not None else '' for v in valores]
         if any(str(v).strip() for v in valores):
             rows.append(valores)
 
@@ -252,9 +351,21 @@ def registro_ja_existe(chave, chaves_existentes):
     return chave in chaves_existentes
 
 
+def _indices_chave_dedup(cabecalho):
+    """Localiza os índices de CARTÃO/CREDENCIAL/DATA/EVENTO de forma case/acento-insensitive
+    (necessário pois formatos de origem diferentes, ex. relatório de cancelas, usam grafia
+    própria). Se o formato não tiver os 4 campos padrão, usa a linha inteira como chave —
+    garante deduplicação segura sem arriscar falso positivo entre registros distintos."""
+    normalizados = [_normalizar(h) for h in cabecalho]
+    chave_normalizada = [_normalizar(c) for c in CHAVE_DEDUP]
+    if all(c in normalizados for c in chave_normalizada):
+        return [normalizados.index(c) for c in chave_normalizada]
+    return list(range(len(cabecalho)))
+
+
 def inserir_registros(ws, cabecalho, headers_origem, rows):
     """Insere apenas registros inéditos abaixo do histórico já presente na aba."""
-    indices_chave = [cabecalho.index(c) for c in CHAVE_DEDUP if c in cabecalho]
+    indices_chave = _indices_chave_dedup(cabecalho)
     mapa_colunas  = [cabecalho.index(h) for h in headers_origem]
 
     chaves_existentes = set()
@@ -328,17 +439,26 @@ if __name__ == '__main__':
         print(f"[ERRO] Pasta não encontrada: {pasta}")
         exit(1)
 
-    arquivos = glob.glob(os.path.join(pasta, '*.csv'))
+    csvs = glob.glob(os.path.join(pasta, '*.csv'))
 
-    if arquivos:
-        print(f"Encontrados {len(arquivos)} arquivo(s) em: {pasta}\n")
-        for arquivo in sorted(arquivos):
+    if csvs:
+        print(f"Encontrados {len(csvs)} CSV(s) em: {pasta}\n")
+        for arquivo in sorted(csvs):
             processar(arquivo)
     else:
         print(f"Nenhum CSV encontrado em: {pasta}")
 
-    # A consolidação roda sempre, mesmo sem CSV novo, para absorver XLSX já
-    # presentes em bases/ que ainda não tenham sido incorporados ao histórico.
+    # Bases que já chegam em XLSX (ex.: relatórios de cancela/catraca) também
+    # são padronizadas; arquivos já estilizados por este script são ignorados.
+    xlsx_brutos = [
+        f for f in glob.glob(os.path.join(pasta, '*.xlsx'))
+        if os.path.basename(f) != NOME_CONSOLIDADO
+    ]
+    for arquivo in sorted(xlsx_brutos):
+        processar_xlsx_bruto(arquivo)
+
+    # A consolidação roda sempre, mesmo sem CSV/XLSX novo, para absorver bases já
+    # presentes em bases/ que ainda não tenham sido incorporadas ao histórico.
     consolidar_planilhas(pasta)
 
     print("\nConcluído.")
