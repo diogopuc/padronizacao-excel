@@ -1,7 +1,7 @@
 # Padronizador de Base Diária de Credenciados
 **PUCPR / Grupo Marista**
 
-Script Python que converte automaticamente a extração diária do sistema de controle de acesso (`.csv`) em uma planilha Excel padronizada com o guia de estilo visual da PUCPR.
+Script Python que converte automaticamente a extração diária do sistema de controle de acesso (`.csv`) em uma planilha Excel padronizada com o guia de estilo visual da PUCPR, além de manter um histórico consolidado por unidade (Curitiba/Toledo).
 
 ---
 
@@ -11,7 +11,8 @@ Script Python que converte automaticamente a extração diária do sistema de co
 dashboard - monitoramento check-in/
 ├── bases/
 │   ├── 17_06_2026.csv       ← base exportada do sistema
-│   └── 17_06_2026.xlsx      ← gerado automaticamente
+│   ├── 17_06_2026.xlsx      ← gerado automaticamente (individual)
+│   └── consolidado.xlsx     ← gerado/atualizado automaticamente (histórico por unidade)
 ├── codigo/
 │   ├── main.py
 │   └── README.md
@@ -39,11 +40,11 @@ pip install openpyxl
 python main.py
 ```
 
-O script detecta todos os CSVs da pasta `bases/` automaticamente e gera o `.xlsx` correspondente na mesma pasta, com o mesmo nome.
+O script detecta todos os CSVs da pasta `bases/` automaticamente e gera o `.xlsx` correspondente na mesma pasta, com o mesmo nome. Em seguida, atualiza automaticamente o `consolidado.xlsx` com o histórico por unidade — esse passo roda sempre, mesmo quando não há CSV novo, para absorver qualquer XLSX já presente em `bases/` que ainda não tenha entrado no histórico.
 
 ```
-17_06_2026.csv  →  17_06_2026.xlsx
-18_06_2026.csv  →  18_06_2026.xlsx
+17_06_2026.csv  →  17_06_2026.xlsx  →  consolidado.xlsx (aba da unidade)
+18_06_2026.csv  →  18_06_2026.xlsx  →  consolidado.xlsx (aba da unidade)
 ```
 
 ---
@@ -56,6 +57,7 @@ O script detecta todos os CSVs da pasta `bases/` automaticamente e gera o `.xlsx
 - Mapeia as colunas corretamente: `Cartão`, `Credencial`, `Data`, `Evento`, `Usuário`, `Descrição`, `Grupo`
 - Aplica a identidade visual da PUCPR conforme o guia de estilo
 - Ativa **filtro automático** e **painel congelado** no cabeçalho
+- Consolida o histórico de todas as bases em `consolidado.xlsx`, separado por unidade, sem duplicar registros já existentes
 
 ---
 
@@ -86,6 +88,23 @@ Paleta de cores conforme o **Guia de Estilo Visual PUCPR**:
 | Texto dos dados | Dark 02 | `#404040` |
 
 Fontes utilizadas: **Poppins** (cabeçalhos) e **Source Sans Pro** (dados).
+
+---
+
+## Consolidado histórico (`consolidado.xlsx`)
+
+Além dos XLSX individuais, o script mantém um arquivo `bases/consolidado.xlsx` com o histórico acumulado de todas as bases já processadas, separado em duas abas fixas:
+
+- `PUCPR - CURITIBA`
+- `PUCPR - TOLEDO`
+
+**Como a unidade é identificada:** o script lê o texto de unidade (linha 1 do XLSX individual) e procura, de forma case-insensitive e sem considerar acentos, pelas palavras `PARANÁ` (→ Curitiba) ou `TOLEDO` (→ Toledo). Bases de unidades não reconhecidas são ignoradas na consolidação (com aviso no terminal), mas continuam gerando seu XLSX individual normalmente.
+
+**Como funciona a leitura:** o script processa **qualquer** arquivo `.xlsx` da pasta `bases/` (exceto o próprio `consolidado.xlsx`), independente do nome. O cabeçalho é localizado dinamicamente (procurando a coluna "Cartão"), então uma coluna nova que surja na origem futuramente é incorporada automaticamente ao consolidado, sem quebrar o processamento.
+
+**Como evita duplicidade:** antes de inserir, cada registro é comparado por uma chave composta de `Cartão + Credencial + Data + Evento`. Só registros inéditos são adicionados — rodar o script várias vezes sobre a mesma base não duplica linhas.
+
+**Como é atualizado:** a cada execução, o histórico é acumulado (novas linhas sempre abaixo das existentes); nada do histórico anterior é sobrescrito ou removido.
 
 ---
 
